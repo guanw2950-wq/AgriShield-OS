@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  # ── 数据库 (PostgreSQL + PostGIS) ──────────────────────
+  postgis:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: agrishield
+      POSTGRES_USER: agrishield
+      POSTGRES_PASSWORD: agrishield_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./data/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "agrishield"]
+      interval: 5s
+      retries: 5
+
+  # ── API 网关 ──────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://agrishield:agrishield_dev@postgis:5432/agrishield
+      GEE_CREDENTIALS: /app/credentials.json
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgis:
+        condition: service_healthy
+
+  # ── 前端沙盘 ──────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8501:8501"
+    environment:
+      API_BASE_URL: http://api:8000/api/v1
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

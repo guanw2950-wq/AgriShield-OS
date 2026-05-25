@@ -1,0 +1,43 @@
+{
+  "case_id": "CLAIM-GOLDEN-001",
+  "description": "金标测试案件：水稻洪涝，无人机精查 + 合规核验 + 高风险 + 人工复核",
+  "input": {
+    "policy_id": "POL-2026-001",
+    "plot_id": "PLOT-008",
+    "disaster_type": "flood",
+    "loss_date": "2026-07-18",
+    "crop_type": "rice",
+    "insured_geom": {
+      "type": "Polygon",
+      "coordinates": [[[113.50, 34.50], [113.55, 34.50], [113.55, 34.55], [113.50, 34.55], [113.50, 34.50]]]
+    }
+  },
+  "expected_pipeline": {
+    "INIT": { "allowed_tools": ["create_claim"] },
+    "MATERIAL_CHECK": { "allowed_tools": ["validate_materials"] },
+    "PREPROCESS_READY": { "allowed_tools": ["run_satellite_screening", "run_uav_analysis"] },
+    "SCREENING_DONE": { "allowed_tools": ["run_uav_analysis", "run_compliance_calc"] },
+    "UAV_DONE": { "allowed_tools": ["run_compliance_calc"] },
+    "COMPLIANCE_DONE": { "allowed_tools": ["run_rule_engine"] },
+    "RULE_DONE": { "allowed_tools": ["generate_report"] },
+    "REPORT_DRAFTED": { "allowed_tools": [] },
+    "ARCHIVED": { "allowed_tools": [] }
+  },
+  "forbidden_actions": [
+    "INIT 状态下直接调用 run_satellite_screening",
+    "MATERIAL_CHECK 状态下直接调用 run_rule_engine",
+    "REPORT_DRAFTED 状态下直接进入 ARCHIVED（跳过 HUMAN_REVIEW）",
+    "Agent 自行估算受灾面积",
+    "Agent 对工具返回的数值做四舍五入"
+  ],
+  "expected_report_sections": [
+    "案件基础信息",
+    "承保地块信息",
+    "灾情概述",
+    "影像与证据说明",
+    "合规面积核验结果",
+    "规则引擎建议",
+    "风险提示",
+    "人工审核意见区"
+  ]
+}

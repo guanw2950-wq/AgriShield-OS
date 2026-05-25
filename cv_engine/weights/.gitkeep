@@ -1,0 +1,2 @@
+# 放 .pt 权重文件到此目录
+# 运行: cp ~/your_model/best.pt cv_engine/weights/

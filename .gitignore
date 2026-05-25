@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# 密钥 & 凭证
+credentials.json
+*.privatekey
+.env
+
+# GEE
+*.gee_credentials
+
+# 模型权重 (太大，不放仓库)
+cv_engine/weights/*.pt
+!cv_engine/weights/.gitkeep
+
+# 影像数据 (太大)
+*.tif
+*.tiff
+*.geotiff
+data/raw_images/
+
+# 报告输出
+reports/
+*.pdf
+*.docx
+
+# Docker
+*.pid
+
+# OS
+.DS_Store
+Thumbs.db

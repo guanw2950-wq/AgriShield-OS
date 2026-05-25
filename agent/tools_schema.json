@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgriShield Agent — 工具注册表 (MiMo Function Calling)",
+  "description": "7 个白名单工具的完整 OpenAPI Function Calling Schema，直接导入 MiMo 平台使用。",
+  "tools": [
+    {
+      "name": "create_claim",
+      "description": "新建农业保险理赔案件。状态：INIT → MATERIAL_CHECK。需要提供保单号、灾害类型、灾害日期、作物类型、地块编号或边界。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "policy_id": { "type": "string", "description": "承保保单唯一 ID，必须提供" },
+          "disaster_type": { "type": "string", "enum": ["flood", "drought", "hail", "typhoon", "pest", "frost", "other"], "description": "灾害类型" },
+          "loss_date": { "type": "string", "description": "灾害发生日期，格式 YYYY-MM-DD" },
+          "crop_type": { "type": "string", "description": "作物类型，如 rice, wheat, corn" },
+          "plot_id": { "type": "string", "description": "地块编号（与 insured_geom 二选一）" },
+          "insured_geom": { "type": "object", "description": "承保地块 GeoJSON Polygon（与 plot_id 二选一）" }
+        },
+        "required": ["policy_id", "disaster_type", "loss_date", "crop_type"]
+      }
+    },
+    {
+      "name": "validate_materials",
+      "description": "校验案件材料的完整性和文件可用性。状态：MATERIAL_CHECK。校验失败必须阻断流程。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "claim_id": { "type": "string", "description": "案件编号" },
+          "insured_geom_path": { "type": "string", "description": "承保边界文件路径（GeoJSON/SHP）" },
+          "uav_image_paths": { "type": "array", "items": { "type": "string" }, "description": "无人机影像路径列表" },
+          "photo_paths": { "type": "array", "items": { "type": "string" }, "description": "现场照片路径列表" }
+        },
+        "required": ["claim_id"]
+      }
+    },
+    {
+      "name": "run_satellite_screening",
+      "description": "卫星遥感初筛。调用 GEE Sentinel-1 SAR 数据提取洪涝淹没范围。结果仅作初筛参考，不能直接作为最终定损结论。状态：PREPROCESS_READY。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "claim_id": { "type": "string", "description": "案件编号" },
+          "roi_geojson": { "type": "object", "description": "兴趣区域 GeoJSON Polygon (EPSG:4326)" },
+          "start_date": { "type": "string", "description": "起始日期 YYYY-MM-DD" },
+          "end_date": { "type": "string", "description": "结束日期 YYYY-MM-DD" }
+        },
+        "required": ["claim_id", "roi_geojson", "start_date", "end_date"]
+      }
+    },
+    {
+      "name": "run_uav_analysis",
+      "description": "无人机精细定损。使用 YOLOv8 实例分割模型对 DOM 影像执行倒伏/受灾区域检测，换算物理面积。状态：PREPROCESS_READY 或 SCREENING_DONE。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "claim_id": { "type": "string", "description": "案件编号" },
+          "uav_image_path": { "type": "string", "description": "无人机正射影像路径" },
+          "gsd_cm": { "type": "number", "description": "地面采样距离 (cm/pixel)，默认 5.0" }
+        },
+        "required": ["claim_id", "uav_image_path"]
+      }
+    },
+    {
+      "name": "run_compliance_calc",
+      "description": "合规面积核验（最关键的防线）。将受灾多边形与承保红线做空间求交 (Intersection)，剔除越界面积，输出合规受灾面积和受损比例。状态：SCREENING_DONE 或 UAV_DONE。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "claim_id": { "type": "string", "description": "案件编号" },
+          "damage_geojson": { "type": "object", "description": "受灾多边形 GeoJSON（来自卫星/CV 引擎）" },
+          "insured_geom": { "type": "object", "description": "承保红线 GeoJSON（来自保单数据库）" }
+        },
+        "required": ["claim_id", "damage_geojson", "insured_geom"]
+      }
+    },
+    {
+      "name": "run_rule_engine",
+      "description": "规则判断。根据合规受灾比例 + 作物类型 + 预估金额，输出建议风险等级和是否需人工复核。结果只能表述为"建议"。状态：COMPLIANCE_DONE。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "claim_id": { "type": "string", "description": "案件编号" },
+          "damage_ratio": { "type": "number", "minimum": 0, "maximum": 1, "description": "合规受灾比例 (0-1)" },
+          "crop_type": { "type": "string", "description": "作物类型" },
+          "threshold_set": { "type": "string", "default": "default_v1", "description": "规则集版本" },
+          "estimated_payout_yuan": { "type": "number", "description": "预估赔付金额（元），用于大额预警" }
+        },
+        "required": ["claim_id", "damage_ratio", "crop_type"]
+      }
+    },
+    {
+      "name": "generate_report",
+      "description": "生成固定模板报告草稿。只能生成草稿，不得自动归档。状态：RULE_DONE。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "claim_id": { "type": "string", "description": "案件编号" },
+          "template_version": { "type": "string", "default": "v1.0", "description": "报告模板版本" }
+        },
+        "required": ["claim_id"]
+      }
+    }
+  ]
+}
