@@ -30,8 +30,10 @@ data/raw_images/
 
 # 报告输出
 reports/
-*.pdf
-*.docx
+
+# 文档（保留设计文档）
+# *.pdf
+# *.docx
 
 # Docker
 *.pid
