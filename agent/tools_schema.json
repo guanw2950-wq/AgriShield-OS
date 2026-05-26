@@ -1,32 +1,37 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "AgriShield Agent — 工具注册表 (MiMo Function Calling)",
-  "description": "7 个白名单工具的完整 OpenAPI Function Calling Schema，直接导入 MiMo 平台使用。",
+  "title": "AgriShield Agent — MiMo 工具注册表",
+  "description": "7 个白名单工具，API 通过 ngrok 隧道连接到本地 FastAPI 网关。",
+  "base_url": "https://margin-hydrant-decathlon.ngrok-free.dev/api/v1",
   "tools": [
     {
       "name": "create_claim",
-      "description": "新建农业保险理赔案件。状态：INIT → MATERIAL_CHECK。需要提供保单号、灾害类型、灾害日期、作物类型、地块编号或边界。",
+      "description": "新建农业保险理赔案件。需要保单号、灾害类型、灾害日期、作物类型、地块编号。调用后案件进入 MATERIAL_CHECK 状态。",
+      "method": "POST",
+      "endpoint": "/tools/create_claim",
       "parameters": {
         "type": "object",
         "properties": {
-          "policy_id": { "type": "string", "description": "承保保单唯一 ID，必须提供" },
+          "policy_id": { "type": "string", "description": "承保保单唯一 ID" },
           "disaster_type": { "type": "string", "enum": ["flood", "drought", "hail", "typhoon", "pest", "frost", "other"], "description": "灾害类型" },
-          "loss_date": { "type": "string", "description": "灾害发生日期，格式 YYYY-MM-DD" },
+          "loss_date": { "type": "string", "description": "灾害发生日期 YYYY-MM-DD" },
           "crop_type": { "type": "string", "description": "作物类型，如 rice, wheat, corn" },
           "plot_id": { "type": "string", "description": "地块编号（与 insured_geom 二选一）" },
-          "insured_geom": { "type": "object", "description": "承保地块 GeoJSON Polygon（与 plot_id 二选一）" }
+          "insured_geom": { "type": "object", "description": "承保地块 GeoJSON（与 plot_id 二选一）" }
         },
         "required": ["policy_id", "disaster_type", "loss_date", "crop_type"]
       }
     },
     {
       "name": "validate_materials",
-      "description": "校验案件材料的完整性和文件可用性。状态：MATERIAL_CHECK。校验失败必须阻断流程。",
+      "description": "校验案件材料完整性。检查边界文件、影像文件是否可用。校验失败必须阻断流程。",
+      "method": "POST",
+      "endpoint": "/tools/validate_materials",
       "parameters": {
         "type": "object",
         "properties": {
           "claim_id": { "type": "string", "description": "案件编号" },
-          "insured_geom_path": { "type": "string", "description": "承保边界文件路径（GeoJSON/SHP）" },
+          "insured_geom_path": { "type": "string", "description": "承保边界文件路径" },
           "uav_image_paths": { "type": "array", "items": { "type": "string" }, "description": "无人机影像路径列表" },
           "photo_paths": { "type": "array", "items": { "type": "string" }, "description": "现场照片路径列表" }
         },
@@ -35,7 +40,9 @@
     },
     {
       "name": "run_satellite_screening",
-      "description": "卫星遥感初筛。调用 GEE Sentinel-1 SAR 数据提取洪涝淹没范围。结果仅作初筛参考，不能直接作为最终定损结论。状态：PREPROCESS_READY。",
+      "description": "卫星遥感初筛。调用 GEE Sentinel-1 SAR 数据提取洪涝水体，输出疑似受灾面积和受损比例。结果仅作初筛参考，不能直接作为定损结论。",
+      "method": "POST",
+      "endpoint": "/tools/run_satellite_screening",
       "parameters": {
         "type": "object",
         "properties": {
@@ -49,48 +56,56 @@
     },
     {
       "name": "run_uav_analysis",
-      "description": "无人机精细定损。使用 YOLOv8 实例分割模型对 DOM 影像执行倒伏/受灾区域检测，换算物理面积。状态：PREPROCESS_READY 或 SCREENING_DONE。",
+      "description": "无人机精细定损。使用 YOLOv8 实例分割模型对 DOM 影像执行倒伏/受灾检测，换算物理面积。当前模型待训练，返回 Mock 数据。",
+      "method": "POST",
+      "endpoint": "/tools/run_uav_analysis",
       "parameters": {
         "type": "object",
         "properties": {
           "claim_id": { "type": "string", "description": "案件编号" },
           "uav_image_path": { "type": "string", "description": "无人机正射影像路径" },
-          "gsd_cm": { "type": "number", "description": "地面采样距离 (cm/pixel)，默认 5.0" }
+          "gsd_cm": { "type": "number", "description": "地面采样距离 cm/pixel，默认 5.0" }
         },
         "required": ["claim_id", "uav_image_path"]
       }
     },
     {
       "name": "run_compliance_calc",
-      "description": "合规面积核验（最关键的防线）。将受灾多边形与承保红线做空间求交 (Intersection)，剔除越界面积，输出合规受灾面积和受损比例。状态：SCREENING_DONE 或 UAV_DONE。",
+      "description": "合规面积核验（最关键的防线）。将受灾多边形与承保红线做空间求交，剔除越界面积，输出合规受灾面积、受损比例和剔除日志。",
+      "method": "POST",
+      "endpoint": "/tools/run_compliance_calc",
       "parameters": {
         "type": "object",
         "properties": {
           "claim_id": { "type": "string", "description": "案件编号" },
-          "damage_geojson": { "type": "object", "description": "受灾多边形 GeoJSON（来自卫星/CV 引擎）" },
-          "insured_geom": { "type": "object", "description": "承保红线 GeoJSON（来自保单数据库）" }
+          "damage_geojson": { "type": "object", "description": "受灾多边形 GeoJSON" },
+          "insured_geom": { "type": "object", "description": "承保红线 GeoJSON" }
         },
         "required": ["claim_id", "damage_geojson", "insured_geom"]
       }
     },
     {
       "name": "run_rule_engine",
-      "description": "规则判断。根据合规受灾比例 + 作物类型 + 预估金额，输出建议风险等级和是否需人工复核。结果只能表述为"建议"。状态：COMPLIANCE_DONE。",
+      "description": "规则判断。根据受灾比例 + 作物类型 + 预估金额，输出建议风险等级和是否需要人工复核。结果只能表述为建议。",
+      "method": "POST",
+      "endpoint": "/tools/run_rule_engine",
       "parameters": {
         "type": "object",
         "properties": {
           "claim_id": { "type": "string", "description": "案件编号" },
-          "damage_ratio": { "type": "number", "minimum": 0, "maximum": 1, "description": "合规受灾比例 (0-1)" },
+          "damage_ratio": { "type": "number", "minimum": 0, "maximum": 1, "description": "合规受灾比例 0-1" },
           "crop_type": { "type": "string", "description": "作物类型" },
           "threshold_set": { "type": "string", "default": "default_v1", "description": "规则集版本" },
-          "estimated_payout_yuan": { "type": "number", "description": "预估赔付金额（元），用于大额预警" }
+          "estimated_payout_yuan": { "type": "number", "description": "预估赔付金额（元）" }
         },
         "required": ["claim_id", "damage_ratio", "crop_type"]
       }
     },
     {
       "name": "generate_report",
-      "description": "生成固定模板报告草稿。只能生成草稿，不得自动归档。状态：RULE_DONE。",
+      "description": "生成固定模板报告草稿。只能生成草稿不得自动归档。报告包含 8 个章节：案件信息、地块信息、灾情、影像、合规结果、规则建议、风险提示、人工审核区。",
+      "method": "POST",
+      "endpoint": "/tools/generate_report",
       "parameters": {
         "type": "object",
         "properties": {
