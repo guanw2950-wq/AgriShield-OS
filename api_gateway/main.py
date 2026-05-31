@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from schemas import (
     AgentOutput,
@@ -32,6 +35,7 @@ from schemas import (
     ComplianceCalcResult,
     CreateClaimRequest,
     CreateClaimResponse,
+    GrowthAnalysisResult,
     MaterialCheckResult,
     NextAction,
     ReportGenerateRequest,
@@ -72,6 +76,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── 静态输出（长势分析 PNG/CSV/DOCX/TIF）───────────────────
+OUTPUT_ROOT = Path(__file__).resolve().parent.parent / "outputs"
+OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory=str(OUTPUT_ROOT)), name="outputs")
 
 # ── 内存存储（MVP 阶段，后续换 PostgreSQL）────────────────
 CASES: dict[str, ClaimCase] = {}
@@ -223,7 +232,7 @@ async def validate_materials(req: ValidateMaterialsRequest) -> MaterialCheckResu
 # ═══════════════════════════════════════════════════════════
 
 # ── GEE 配置 ──────────────────────────────────────────────
-GEE_PROJECT_ID = "agrishield-497410"
+GEE_PROJECT_ID = os.getenv("GEE_PROJECT_ID", "ee-xniu010521")
 
 
 @app.post("/api/v1/tools/run_satellite_screening", response_model=SatelliteScreeningResult)
@@ -244,6 +253,8 @@ async def run_satellite_screening(req: SatelliteScreeningRequest) -> SatelliteSc
         )
     except ImportError as e:
         logger.error(f"GEE 引擎加载失败: {e}")
+        _audit(req.claim_id, "run_satellite_screening", "run_satellite_screening",
+               req.model_dump(), f"error=GEE 引擎加载失败: {e}")
         return SatelliteScreeningResult(
             status="error",
             suspected_damage_area_mu=0,
@@ -253,6 +264,8 @@ async def run_satellite_screening(req: SatelliteScreeningRequest) -> SatelliteSc
         )
 
     if gee_result["status"] != "success":
+        _audit(req.claim_id, "run_satellite_screening", "run_satellite_screening",
+               req.model_dump(), f"error={gee_result.get('message', 'satellite screening failed')}")
         return SatelliteScreeningResult(
             status="error",
             suspected_damage_area_mu=0,
@@ -344,9 +357,6 @@ async def run_uav_analysis(req: UAVAnalysisRequest) -> UAVAnalysisResult:
 # 5a. 文件上传方式合规核验（支持 GeoJSON/SHP/KML/GPKG）
 # ═══════════════════════════════════════════════════════════
 
-from fastapi import File, Form, UploadFile
-
-
 @app.post("/api/v1/tools/run_compliance_calc_upload", response_model=ComplianceCalcResult)
 async def run_compliance_calc_upload(
     claim_id: str = Form(...),
@@ -413,6 +423,203 @@ async def run_compliance_calc_upload(
            f"valid={result.valid_damage_area_mu}mu, ratio={result.damage_ratio}")
 
     return result
+
+
+# ═══════════════════════════════════════════════════════════
+# 8. run_growth_analysis_upload — NDVI 作物长势分析
+# ═══════════════════════════════════════════════════════════
+
+@app.post("/api/v1/tools/run_growth_analysis_upload", response_model=GrowthAnalysisResult)
+async def run_growth_analysis_upload(
+    ndvi_file: UploadFile = File(..., description="NDVI GeoTIFF (.tif/.tiff)"),
+    boundary_file: UploadFile = File(..., description="地块边界 (.geojson/.json/.gpkg/.kml 或 SHP zip)"),
+    total_area_mu: float = Form(..., description="用于按比例折算的总面积（亩）"),
+    crop_label: str = Form("玉米"),
+    insurer: str = Form(""),
+    method: str = Form("jenks"),
+    n_classes: int = Form(5),
+    boundary_crs: str = Form("", description="边界缺少 .prj 时可填写，如 EPSG:4526"),
+) -> GrowthAnalysisResult:
+    """上传 NDVI GeoTIFF 和地块边界，执行长势分析并返回前端可视化结果。"""
+    if total_area_mu <= 0:
+        raise HTTPException(400, "total_area_mu 必须大于 0")
+    if n_classes < 2 or n_classes > 9:
+        raise HTTPException(400, "n_classes 需在 2 到 9 之间")
+
+    ndvi_suffix = Path(ndvi_file.filename or "").suffix.lower()
+    if ndvi_suffix not in {".tif", ".tiff"}:
+        raise HTTPException(400, "NDVI 文件需为 .tif 或 .tiff")
+
+    boundary_suffix = Path(boundary_file.filename or "").suffix.lower()
+    if boundary_suffix == ".shp":
+        raise HTTPException(400, "Shapefile 请将 .shp/.shx/.dbf/.prj 打包为 .zip 上传")
+    if boundary_suffix not in {".geojson", ".json", ".gpkg", ".kml", ".zip"}:
+        raise HTTPException(400, "边界文件需为 .geojson/.json/.gpkg/.kml 或 SHP zip")
+
+    task_id = f"growth-{datetime.now().strftime('%Y%m%d%H%M%S')}-{str(uuid.uuid4())[:6]}"
+    task_dir = OUTPUT_ROOT / "growth" / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    src_tif = task_dir / f"input_ndvi{ndvi_suffix}"
+    boundary_path = task_dir / f"boundary{boundary_suffix}"
+    with src_tif.open("wb") as f:
+        shutil.copyfileobj(ndvi_file.file, f)
+    with boundary_path.open("wb") as f:
+        shutil.copyfileobj(boundary_file.file, f)
+
+    try:
+        from growth_analysis import run_growth_analysis
+
+        result = run_growth_analysis(
+            task_id=task_id,
+            src_tif=src_tif,
+            boundary_path=boundary_path,
+            output_dir=task_dir,
+            total_area_mu=total_area_mu,
+            crop_label=crop_label,
+            insurer=insurer,
+            method=method,
+            n_classes=n_classes,
+            boundary_crs=boundary_crs.strip() or None,
+            url_prefix=f"/outputs/growth/{task_id}",
+        )
+    except ImportError as e:
+        logger.exception("长势分析依赖缺失")
+        raise HTTPException(
+            500,
+            f"长势分析依赖缺失: {e}. 请安装 api_gateway/requirements.txt 中的 rasterio/geopandas/matplotlib/mapclassify/python-docx",
+        ) from e
+    except Exception as e:
+        logger.exception("长势分析失败")
+        raise HTTPException(500, f"长势分析失败: {e}") from e
+
+    result["outputs"]["result_json"] = f"/outputs/growth/{task_id}/result.json"
+    (task_dir / "result.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    _audit(
+        task_id,
+        "run_growth_analysis_upload",
+        "run_growth_analysis_upload",
+        {
+            "ndvi_file": ndvi_file.filename,
+            "boundary_file": boundary_file.filename,
+            "total_area_mu": total_area_mu,
+            "crop_label": crop_label,
+            "method": method,
+            "n_classes": n_classes,
+            "boundary_crs": boundary_crs,
+        },
+        f"valid_pixels={result['valid_pixel_count']}",
+    )
+
+    return GrowthAnalysisResult(**result)
+
+
+@app.get("/api/v1/tools/growth_analysis/{task_id}", response_model=GrowthAnalysisResult)
+async def get_growth_analysis(task_id: str) -> GrowthAnalysisResult:
+    """读取历史长势分析任务结果。"""
+    result_path = OUTPUT_ROOT / "growth" / task_id / "result.json"
+    if not result_path.exists():
+        raise HTTPException(404, f"长势分析任务不存在: {task_id}")
+    return GrowthAnalysisResult(**json.loads(result_path.read_text(encoding="utf-8")))
+
+
+# ═══════════════════════════════════════════════════════════
+# 8b. run_growth_analysis_boundary_upload — 仅上传边界自动解译
+# ═══════════════════════════════════════════════════════════
+
+@app.post("/api/v1/tools/run_growth_analysis_boundary_upload", response_model=GrowthAnalysisResult)
+async def run_growth_analysis_boundary_upload(
+    boundary_file: UploadFile = File(..., description="地块边界 (.shp/.geojson/.json/.gpkg/.kml 或 SHP zip)"),
+    total_area_mu: float | None = Form(None, description="可选；留空时由边界自动计算"),
+    crop_label: str = Form("玉米"),
+    insurer: str = Form(""),
+    method: str = Form("jenks"),
+    n_classes: int = Form(5),
+    boundary_crs: str = Form("", description="边界缺少 .prj 时可填写，如 EPSG:4526"),
+    ndvi_source: str = Form("auto", description="auto/gee/synthetic；auto 会优先 GEE，失败后使用本地模拟"),
+    start_date: str = Form("2025-08-30"),
+    end_date: str = Form("2025-09-15"),
+    max_cloud_pct: float = Form(30.0),
+) -> GrowthAnalysisResult:
+    """只上传地块边界，自动准备 NDVI 并执行长势分析。"""
+    if total_area_mu is not None and total_area_mu <= 0:
+        raise HTTPException(400, "total_area_mu 留空或填写大于 0 的数值")
+    if n_classes < 2 or n_classes > 9:
+        raise HTTPException(400, "n_classes 需在 2 到 9 之间")
+    if max_cloud_pct < 0 or max_cloud_pct > 100:
+        raise HTTPException(400, "max_cloud_pct 需在 0 到 100 之间")
+
+    boundary_suffix = Path(boundary_file.filename or "").suffix.lower()
+    if boundary_suffix not in {".shp", ".geojson", ".json", ".gpkg", ".kml", ".zip"}:
+        raise HTTPException(400, "边界文件需为 .shp/.geojson/.json/.gpkg/.kml 或 SHP zip")
+
+    task_id = f"growth-{datetime.now().strftime('%Y%m%d%H%M%S')}-{str(uuid.uuid4())[:6]}"
+    task_dir = OUTPUT_ROOT / "growth" / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    boundary_path = task_dir / f"boundary{boundary_suffix}"
+    with boundary_path.open("wb") as f:
+        shutil.copyfileobj(boundary_file.file, f)
+
+    try:
+        from growth_analysis import run_growth_analysis_from_boundary
+
+        result = run_growth_analysis_from_boundary(
+            task_id=task_id,
+            boundary_path=boundary_path,
+            output_dir=task_dir,
+            total_area_mu=total_area_mu,
+            crop_label=crop_label,
+            insurer=insurer,
+            method=method,
+            n_classes=n_classes,
+            boundary_crs=boundary_crs.strip() or None,
+            ndvi_source=ndvi_source,
+            start_date=start_date,
+            end_date=end_date,
+            max_cloud_pct=max_cloud_pct,
+            gee_project_id=GEE_PROJECT_ID,
+            url_prefix=f"/outputs/growth/{task_id}",
+        )
+    except ImportError as e:
+        logger.exception("边界自动解译依赖缺失")
+        raise HTTPException(
+            500,
+            f"边界自动解译依赖缺失: {e}. 请安装 api_gateway/requirements.txt",
+        ) from e
+    except Exception as e:
+        logger.exception("边界自动解译失败")
+        raise HTTPException(500, f"边界自动解译失败: {e}") from e
+
+    result["outputs"]["result_json"] = f"/outputs/growth/{task_id}/result.json"
+    (task_dir / "result.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    _audit(
+        task_id,
+        "run_growth_analysis_boundary_upload",
+        "run_growth_analysis_boundary_upload",
+        {
+            "boundary_file": boundary_file.filename,
+            "total_area_mu": total_area_mu,
+            "crop_label": crop_label,
+            "method": method,
+            "n_classes": n_classes,
+            "boundary_crs": boundary_crs,
+            "ndvi_source": ndvi_source,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        f"valid_pixels={result['valid_pixel_count']}, source={result['raster'].get('ndvi_source')}",
+    )
+
+    return GrowthAnalysisResult(**result)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -614,14 +821,17 @@ async def human_review(claim_id: str, approved: bool, reviewer: str = "unknown")
         raise HTTPException(400, f"当前状态 {case.state.value} 不允许人工审核")
 
     if approved:
+        if case.state == CaseState.REPORT_DRAFTED:
+            _advance_state(case, S.HUMAN_REVIEW)
         _advance_state(case, S.ARCHIVED)
         _audit(claim_id, "human_review", actor="human",
                tool_args={"approved": True, "reviewer": reviewer},
                result_summary="审核通过，已归档")
         return {"claim_id": claim_id, "state": "ARCHIVED", "action": "approved"}
     else:
-        # 驳回：回退到 REPORT_DRAFTED 供修正
-        case.state = CaseState.REPORT_DRAFTED
+        # 驳回：从审核态回退到报告草稿，草稿态重复驳回则保持不变。
+        if case.state == CaseState.HUMAN_REVIEW:
+            _advance_state(case, S.REPORT_DRAFTED)
         _audit(claim_id, "human_review", actor="human",
                tool_args={"approved": False, "reviewer": reviewer},
                result_summary="审核驳回，回退到 REPORT_DRAFTED")

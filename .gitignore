@@ -41,3 +41,15 @@ reports/
 # OS
 .DS_Store
 Thumbs.db
+
+# Node / Next.js
+node_modules/
+.next/
+*.log
+
+# ngrok
+ngrok.exe
+ngrok*.zip
+
+# 输出产物
+outputs/

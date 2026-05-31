@@ -202,6 +202,33 @@ class ReportGenerateResult(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════════
+# 8. 作物长势 NDVI 分析
+# ═══════════════════════════════════════════════════════════
+
+class GrowthLevelSummary(BaseModel):
+    value: int
+    label: str
+    count: int
+    ratio: float
+    area_mu: float
+    color: str
+
+
+class GrowthAnalysisResult(BaseModel):
+    status: str
+    task_id: str
+    method: str = "jenks"
+    n_classes: int = 5
+    total_area_mu: float
+    valid_pixel_count: int
+    class_breaks: list[float] = Field(default_factory=list)
+    raster: dict[str, Any] = Field(default_factory=dict)
+    summary: list[GrowthLevelSummary] = Field(default_factory=list)
+    outputs: dict[str, Optional[str]] = Field(default_factory=dict)
+    message: str = ""
+
+
+# ═══════════════════════════════════════════════════════════
 # Agent 统一输出壳
 # ═══════════════════════════════════════════════════════════
 

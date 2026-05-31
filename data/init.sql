@@ -1,0 +1,2 @@
+-- Placeholder init script for the PostGIS container.
+-- The MVP currently stores cases in memory; database migrations can replace this file.
